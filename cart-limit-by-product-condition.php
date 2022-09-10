@@ -4,7 +4,7 @@
  * Plugin URI:  
  * Description: 設定商品合併限制
  * Text Domain: wcl-plugin
- * Version:     1.0
+ * Version:     1.1
  * Author:      nomad ju
  * Author URI:  
  * License:     GPL2
@@ -57,7 +57,8 @@ if(! class_exists('cart_limit_by_produt_condition')) {
                         woocommerce_wp_checkbox(
                             array(
                                 'id'        => 'clbpc_include_solo_option',
-                                'label'     => __('不可单独下单', 'clbpc'),
+                                'label'     => __('为附加产品', 'clbpc'),
+                                'description'  => __('不可单独下单，必须合并"非"附加产品下单', 'clbpc')
                             )
                         );
                         woocommerce_wp_text_input(
@@ -101,7 +102,7 @@ if(! class_exists('cart_limit_by_produt_condition')) {
                 $condition_cats = explode(',', $tag_data);
                 $condition_cats = array_filter($condition_cats);
                 if ($is_limit && count($cart_items) > 1) {
-                    if (!self::is_other_item_fix_limit($condition_cats, $cart_items, $cart_item)) $is_violation = 1;
+                    if (!self::is_other_item_fix_limit($condition_cats, $cart_items, $cart_item, $solo_limit)) $is_violation = 1;
                 }elseif ($is_limit && $solo_limit) {
                     $is_violation = 1;
                 }
@@ -112,13 +113,16 @@ if(! class_exists('cart_limit_by_produt_condition')) {
             }
         }
 
-        private function is_other_item_fix_limit($condition_cats, $cart_items, $cart_item) {
+        private function is_other_item_fix_limit($condition_cats, $cart_items, $cart_item, $solo_limit) {
+            $noraml_product = 0;
             if (!empty($condition_cats)) {
                 foreach( $cart_items as $other_cart_item ){
                     if($other_cart_item['product_id'] != $cart_item['product_id']) {
                         if (self::is_fix_cat($other_cart_item, $condition_cats)) return 0;
+                        if (!self::is_solo_limit_product($other_cart_item['product_id'])) $noraml_product = 1;
                     }
                 }
+                if ($solo_limit && !$noraml_product) return 0;
                 return 1;
             }
             return 0;
@@ -131,6 +135,11 @@ if(! class_exists('cart_limit_by_produt_condition')) {
                 }
             }
             return 0;
+        }
+
+        private function is_solo_limit_product($product_id) {
+            $product = wc_get_product($product_id);
+            return wc_string_to_bool($product->get_meta('clbpc_include_solo_option'));
         }
     }
 
