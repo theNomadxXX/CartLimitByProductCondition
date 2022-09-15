@@ -24,10 +24,17 @@ if(! class_exists('cart_limit_by_produt_condition')) {
             //Save tje custom fields
             add_action('woocommerce_process_product_meta', array($this, 'save_fields'));
 
+            // Add Variation Settings
+            add_action( 'woocommerce_product_after_variable_attributes', array($this, 'variation_settings_fields'), 10, 3 );
+
+            
             //-----------------------------------------
 		    add_action( 'woocommerce_check_cart_items', array($this,'check_cart_limit'),15,0 );
 
+            // Save Variation Settings
+		    add_action( 'woocommerce_save_product_variation', array($this,'save_variation_settings_fields'),10, 2 );
         }
+
 
         public function create_cart_limit_tab($tabs) {
             $tabs['clbpc'] = array(
@@ -47,8 +54,16 @@ if(! class_exists('cart_limit_by_produt_condition')) {
                         <?php
                         woocommerce_wp_checkbox(
                             array(
+                                'id'        => 'clbpc_include_varitaion_limit',
+                                'label'     => __('本賣場內变量群组限制', 'clbpc'),
+                                'desc_tip'    => 'true',
+                                'description'  => __('启动变量产品间的订单合并限制，请至变量区块设置群组ID', 'clbpc')
+                            )
+                        );
+                        woocommerce_wp_checkbox(
+                            array(
                                 'id'        => 'include_clbpc_option',
-                                'label'     => __('开启限制', 'clbpc'),
+                                'label'     => __('开启與其他賣場的限制', 'clbpc'),
                             )
                         );
                         ?>
@@ -58,6 +73,7 @@ if(! class_exists('cart_limit_by_produt_condition')) {
                             array(
                                 'id'        => 'clbpc_include_solo_option',
                                 'label'     => __('为附加产品', 'clbpc'),
+                                'desc_tip'    => 'true',
                                 'description'  => __('不可单独下单，必须合并"非"附加产品下单', 'clbpc')
                             )
                         );
@@ -65,6 +81,7 @@ if(! class_exists('cart_limit_by_produt_condition')) {
                             array(
                                 'id'        => 'clbpc_condition_cats',
                                 'label'     => __('合并的必要分类', 'clbpc'),
+                                'desc_tip'    => 'true',
                                 'description'  => __('使用英文半角逗号隔开分类，空白则是不可与任何分类合并', 'clbpc')
                             )
                         );
@@ -83,10 +100,39 @@ if(! class_exists('cart_limit_by_produt_condition')) {
             $clbpc_include_solo_option = isset($_POST['clbpc_include_solo_option']) ? 'yes' : 'no';
             $product -> update_meta_data('clbpc_include_solo_option', sanitize_text_field($clbpc_include_solo_option));
 
+            $clbpc_include_varitaion_limit = isset($_POST['clbpc_include_varitaion_limit']) ? 'yes' : 'no';
+            $product -> update_meta_data('clbpc_include_varitaion_limit', sanitize_text_field($clbpc_include_varitaion_limit));
+
             $clbpc_condition_cats = isset($_POST['clbpc_condition_cats']) ? $_POST['clbpc_condition_cats'] : '';
             $product -> update_meta_data('clbpc_condition_cats', sanitize_text_field($clbpc_condition_cats));
 
             $product -> save();
+        }
+
+        // ------------------------------------------------------------------------------------------
+        //variation
+        public function variation_settings_fields( $loop, $variation_data, $variation ) {
+            // Number Field
+            woocommerce_wp_text_input( 
+                array( 
+                'id'          => 'clbpc_variation_group_id['. $loop .']', 
+                'label'       => __( '变量群组编号', 'clbpc' ), 
+                'desc_tip'    => true,
+                'wrapper_class' => 'form-row form-row-last',
+                'description' => __( '相同群组编号者可合并订单', 'clbpc' ),
+                'type'        => 'number', 
+                'value'       => get_post_meta($variation->ID, 'clbpc_variation_group_id', true),
+                'custom_attributes' => array(
+                        'step'  => '1',
+                        'min' => '0'
+                        ) 
+                )
+            );
+        }
+
+        public function save_variation_settings_fields($variation_id, $i) {
+            $number_field = $_POST['clbpc_variation_group_id'][$i];
+            update_post_meta( $variation_id, 'clbpc_variation_group_id', esc_attr( $number_field ) );
         }
 
         // ------------------------------------------------------------------------------------------
@@ -98,6 +144,7 @@ if(! class_exists('cart_limit_by_produt_condition')) {
                 $product = wc_get_product($cart_item['product_id']);
                 $is_limit = wc_string_to_bool($product->get_meta('include_clbpc_option'));
                 $solo_limit = wc_string_to_bool($product->get_meta('clbpc_include_solo_option'));
+                $varitation_limit = wc_string_to_bool($product->get_meta('clbpc_include_varitaion_limit'));
                 $tag_data = $product->get_meta('clbpc_condition_cats');
                 $condition_cats = explode(',', $tag_data);
                 $condition_cats = array_filter($condition_cats);
@@ -106,26 +153,38 @@ if(! class_exists('cart_limit_by_produt_condition')) {
                 }elseif ($is_limit && $solo_limit) {
                     $is_violation = 1;
                 }
+                if ($varitation_limit) {
+                    if (!self::is_same_item_fix_limit($cart_items, $cart_item)) $is_violation = 1;
+                }
             }
-
 		    if ($is_violation) {
 		        wc_add_notice(__('不符合商品合并规范，请检查并删除不可合并的商品', 'clbpc'), 'error');
             }
         }
 
         private function is_other_item_fix_limit($condition_cats, $cart_items, $cart_item, $solo_limit) {
-            $noraml_product = 0;
-            if (!empty($condition_cats)) {
+            $is_pass = 0;
+            foreach( $cart_items as $other_cart_item ){
+                if($other_cart_item['product_id'] != $cart_item['product_id']) {
+                    if (empty($condition_cats)) return 0;
+                    if (self::is_fix_cat($other_cart_item, $condition_cats)) return 0;
+                    if (!self::is_solo_limit_product($other_cart_item['product_id'])) $is_pass = 1;
+                }
+            }
+            if ($solo_limit && !$is_pass) return 0;
+            return 1;
+        }
+
+        private function is_same_item_fix_limit($cart_items, $cart_item) {
+            $product = wc_get_product($cart_item['product_id']);
+            if($product->get_type() == "variable" && !empty($product->get_available_variations())) {
                 foreach( $cart_items as $other_cart_item ){
-                    if($other_cart_item['product_id'] != $cart_item['product_id']) {
-                        if (self::is_fix_cat($other_cart_item, $condition_cats)) return 0;
-                        if (!self::is_solo_limit_product($other_cart_item['product_id'])) $noraml_product = 1;
+                    if($other_cart_item['product_id'] == $cart_item['product_id']) {
+                        if (!self::is_fix_varitation_id($cart_item, $other_cart_item)) return 0;
                     }
                 }
-                if ($solo_limit && !$noraml_product) return 0;
-                return 1;
             }
-            return 0;
+            return 1;
         }
 
         private function is_fix_cat($cart_item, $condition_cats) {
@@ -141,6 +200,12 @@ if(! class_exists('cart_limit_by_produt_condition')) {
             $product = wc_get_product($product_id);
             return wc_string_to_bool($product->get_meta('clbpc_include_solo_option'));
         }
+
+        private function is_fix_varitation_id($cart_item, $other_cart_item) {
+            $my_limit_id = get_post_meta($cart_item['variation_id'], 'clbpc_variation_group_id', true);
+            $other_limit_id = get_post_meta($other_cart_item['variation_id'], 'clbpc_variation_group_id', true);
+            return $my_limit_id == $other_limit_id;
+        }
     }
 
 }
@@ -148,3 +213,5 @@ if(! class_exists('cart_limit_by_produt_condition')) {
 if ( in_array( 'woocommerce/woocommerce.php', apply_filters( 'active_plugins', get_option( 'active_plugins' ) ) ) ) {
 	$cart_limit_by_produt_condition = new cart_limit_by_produt_condition(); 	
 }
+
+
